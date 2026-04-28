@@ -1,0 +1,56 @@
+# Конфигурация pipeline для системы детекции трафика
+
+# Настройки сбора данных
+collection:
+  interface: "Ethernet"  # Сетевой интерфейс
+  duration: 60          # Длительность сбора в секундах
+  filters: "tcp or udp" # Фильтры пакетов
+  batch_size: 1000      # Размер батча для записи
+  flush_interval: 2.0   # Интервал сброса данных
+
+# Настройки предобработки
+preprocessing:
+  window_size: 100      # Размер окна для агрегации
+  feature_selection: true  # Включить отбор признаков
+  normalization: true   # Нормализация данных
+  outlier_removal: true # Удаление выбросов
+
+# Настройки обучения
+training:
+  model_type: "hybrid"  # Тип модели: autoencoder, hybrid
+  epochs: 50           # Количество эпох
+  batch_size: 32       # Размер батча
+  learning_rate: 0.001 # Скорость обучения
+  validation_split: 0.2 # Доля валидационных данных
+
+  # Параметры для anomaly detection
+  anomaly_detection:
+    contamination: 0.1  # Ожидаемая доля аномалий
+    threshold_quantile: 0.99  # Квантиль для порога
+
+# Настройки валидации
+validation:
+  test_size: 0.2       # Доля тестовых данных
+  metrics: ["accuracy", "precision", "recall", "f1", "roc_auc"]
+  cross_validation_folds: 5
+
+# Настройки мониторинга
+monitoring:
+  enabled: true
+  metrics_interval: 60  # Интервал сбора метрик в секундах
+  alert_thresholds:
+    anomaly_rate: 0.1   # Порог для алертов по аномалиям
+    latency: 1000       # Максимальная latency в мс
+
+# Пути к данным
+paths:
+  data_dir: "data"
+  models_dir: "models"
+  results_dir: "results"
+  logs_dir: "logs"
+
+# Логирование
+logging:
+  level: "INFO"
+  file: "logs/pipeline.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

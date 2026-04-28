@@ -1,0 +1,24 @@
+# Общий requirements.txt для всего проекта
+# Сбор данных
+scapy>=2.5.0
+pyarrow>=10.0.0
+
+# Научные вычисления и ML
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+scikit-learn>=1.0.0
+pyod>=1.0.0
+torch>=1.11.0
+tensorflow>=2.8.0
+
+# Конфигурация и логирование
+PyYAML>=6.0
+loguru>=0.6.0
+
+# Мониторинг
+prometheus-client>=0.14.0
+
+# Дополнительно для обработки
+matplotlib>=3.5.0
+seaborn>=0.11.0
