@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Export chapter 1 from a Markdown thesis file into a DOCX formatted close to GOST.
+"""Export a Markdown thesis chapter into a DOCX formatted close to GOST.
 
 - Input: Markdown file (default: Диплом.md)
 - Output: DOCX (default: Первая глава.docx)
-- Extracts content starting from the first H2 that begins with "## 2." (Chapter 1 section)
+- By default extracts content starting from the first H2 that begins with
+  "## 2." (Chapter 1 section). Use --start-prefix for other chapters.
 
 Notes / limitations:
 - LaTeX math ($...$, $$...$$) is preserved as plain text.
@@ -123,12 +124,12 @@ def _add_page_number_footer(doc: Document, cfg: GostConfig) -> None:
     run._r.append(fld_end)
 
 
-def _extract_first_chapter(md_text: str) -> str:
+def _extract_chapter(md_text: str, start_prefix: str) -> str:
     lines = md_text.splitlines()
 
     start_idx: Optional[int] = None
     for i, line in enumerate(lines):
-        if line.startswith("## 2."):
+        if line.startswith(start_prefix):
             start_idx = i
             break
 
@@ -136,9 +137,12 @@ def _extract_first_chapter(md_text: str) -> str:
         # Fallback: return whole document
         return md_text
 
+    start_heading = _HEADING_RE.match(lines[start_idx])
+    start_level = len(start_heading.group(1)) if start_heading else 1
     end_idx = len(lines)
     for j in range(start_idx + 1, len(lines)):
-        if lines[j].startswith("## ") and not lines[j].startswith("## 2."):
+        heading = _HEADING_RE.match(lines[j])
+        if heading and len(heading.group(1)) <= start_level and not lines[j].startswith(start_prefix):
             end_idx = j
             break
 
@@ -363,13 +367,18 @@ def md_to_docx(md_text: str, out_path: Path, cfg: GostConfig) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export first chapter from Markdown to DOCX (GOST-like formatting)")
+    parser = argparse.ArgumentParser(description="Export a Markdown chapter to DOCX (GOST-like formatting)")
     parser.add_argument("--md", default="Диплом.md", help="Input Markdown file")
     parser.add_argument("--out", default="Первая глава.docx", help="Output DOCX file")
     parser.add_argument(
+        "--start-prefix",
+        default="## 2.",
+        help="Heading prefix where export starts, for example '## 2.' or '# 8.'",
+    )
+    parser.add_argument(
         "--whole",
         action="store_true",
-        help="Export the whole Markdown instead of extracting chapter starting from '## 2.'",
+        help="Export the whole Markdown instead of extracting by --start-prefix",
     )
 
     args = parser.parse_args()
@@ -379,7 +388,7 @@ def main() -> None:
 
     text = md_path.read_text(encoding="utf-8")
     if not args.whole:
-        text = _extract_first_chapter(text)
+        text = _extract_chapter(text, args.start_prefix)
 
     cfg = GostConfig()
     md_to_docx(text, out_path, cfg)
