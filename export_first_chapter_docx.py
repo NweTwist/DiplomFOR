@@ -44,6 +44,9 @@ class GostConfig:
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _OL_RE = re.compile(r"^(\d+)[\.)]\s+(.*)$")
 _UL_RE = re.compile(r"^[-*]\s+(.*)$")
+_IMAGE_RE = re.compile(r"^!\[(.*?)\]\((.*?)\)\s*$")
+_FIGURE_CAPTION_RE = re.compile(r"^Рисунок\s+\d+(?:\.\d+)*\s+[—-]\s+.+$")
+_TABLE_CAPTION_RE = re.compile(r"^Таблица\s+\d+(?:\.\d+)*\s+[—-]\s+.+$")
 
 
 def _set_run_font(run, font_name: str, size_pt: int, bold: Optional[bool] = None, italic: Optional[bool] = None):
@@ -251,7 +254,14 @@ def _add_table(doc: Document, rows: List[List[str]], cfg: GostConfig) -> None:
             _set_run_font(run, cfg.font_name, cfg.font_size_pt, bold=(r_idx == 0))
 
 
-def md_to_docx(md_text: str, out_path: Path, cfg: GostConfig) -> None:
+def _add_centered_caption(doc: Document, text: str, cfg: GostConfig) -> None:
+    p = doc.add_paragraph(style="Normal")
+    _configure_paragraph_gost(p, cfg, first_line_indent=0, align=WD_ALIGN_PARAGRAPH.CENTER)
+    run = p.add_run(text.strip())
+    _set_run_font(run, cfg.font_name, cfg.font_size_pt)
+
+
+def md_to_docx(md_text: str, out_path: Path, cfg: GostConfig, *, base_dir: Optional[Path] = None) -> None:
     doc = Document()
     _configure_document_gost(doc, cfg)
     _add_page_number_footer(doc, cfg)
@@ -290,6 +300,41 @@ def md_to_docx(md_text: str, out_path: Path, cfg: GostConfig) -> None:
             i += 1
             continue
 
+        # Table captions are written before tables in Markdown for readability,
+        # but rendered after the table in DOCX to keep object-then-caption order.
+        if _TABLE_CAPTION_RE.match(line.strip()):
+            table_i = i + 1
+            while table_i < len(lines) and not lines[table_i].strip():
+                table_i += 1
+            table_rows, next_i = _parse_table_block(lines, table_i)
+            if table_rows is not None:
+                _add_table(doc, table_rows, cfg)
+                _add_centered_caption(doc, line.strip(), cfg)
+                i = next_i
+                continue
+
+            _add_centered_caption(doc, line.strip(), cfg)
+            i += 1
+            continue
+
+        # Images: ![caption](relative/path.png)
+        m_image = _IMAGE_RE.match(line.strip())
+        if m_image:
+            image_ref = m_image.group(2).strip().strip('"')
+            image_path = Path(image_ref)
+            if not image_path.is_absolute() and base_dir is not None:
+                image_path = base_dir / image_path
+
+            p = doc.add_paragraph(style="Normal")
+            _configure_paragraph_gost(p, cfg, first_line_indent=0, align=WD_ALIGN_PARAGRAPH.CENTER)
+            if image_path.exists():
+                p.add_run().add_picture(str(image_path), width=Cm(15.5))
+            else:
+                run = p.add_run(f"[Изображение не найдено: {image_ref}]")
+                _set_run_font(run, cfg.font_name, cfg.font_size_pt)
+            i += 1
+            continue
+
         # Tables
         table_rows, next_i = _parse_table_block(lines, i)
         if table_rows is not None:
@@ -320,6 +365,12 @@ def md_to_docx(md_text: str, out_path: Path, cfg: GostConfig) -> None:
 
         # Blank line
         if not line.strip():
+            i += 1
+            continue
+
+        # Figure captions
+        if _FIGURE_CAPTION_RE.match(line.strip()):
+            _add_centered_caption(doc, line.strip(), cfg)
             i += 1
             continue
 
@@ -391,7 +442,7 @@ def main() -> None:
         text = _extract_chapter(text, args.start_prefix)
 
     cfg = GostConfig()
-    md_to_docx(text, out_path, cfg)
+    md_to_docx(text, out_path, cfg, base_dir=md_path.parent)
     print(f"Saved: {out_path.resolve()}")
 
 
