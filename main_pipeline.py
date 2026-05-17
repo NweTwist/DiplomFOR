@@ -1,382 +1,354 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Главный pipeline для системы детекции аномального сетевого трафика
-Реализует MLOps-цикл согласно этапам:
-1. Сбор телеметрии
-2. Предобработка и разметка
-3. Обучение и дообучение модели
-4. Валидация и тест
-5. Мониторинг качества
+Главный pipeline: сбор -> предобработка/признаки -> обучение pyOD ->
+инференс -> углубленная проверка -> решение -> события/метрики (логика главы 2 ВКР).
 """
 
 import argparse
-import sys
-import os
-from pathlib import Path
 import logging
+import sys
+import time
 from datetime import datetime
-from collections import defaultdict
-import pickle
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# Настройка логирования
+import pandas as pd
+import yaml
+
+from detection_core import (
+    TrainedEnsemble,
+    flow_rows_from_parquet,
+    load_ensemble,
+    predict_frames,
+    save_ensemble,
+    train_ensemble,
+    write_events_jsonl,
+)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Добавление путей к компонентам
-sys.path.append(str(Path(__file__).parent / 'Packet-Real-Time-Collector' / 'src'))
-sys.path.append(str(Path(__file__).parent / 'Deep-Packet-Inspection-engine'))
-sys.path.append(str(Path(__file__).parent / 'NN_for_PacketAnalyse' / 'src'))
+COLLECTOR_SRC = Path(__file__).parent / "Packet-Real-Time-Collector" / "src"
+
+
+def _load_yaml(path: Path) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _load_parquet_dir(root: Path) -> pd.DataFrame:
+    files = sorted(root.rglob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"Нет .parquet в {root}")
+    parts = [pd.read_parquet(p) for p in files]
+    return pd.concat(parts, ignore_index=True)
+
+
+def _latest_parquet_under(roots: List[Path]) -> Path:
+    cands: List[Path] = []
+    for r in roots:
+        if r.exists():
+            cands.extend(r.rglob("*.parquet"))
+    if not cands:
+        raise FileNotFoundError("Parquet не найдены в raw/ и synthetic/")
+    return max(cands, key=lambda p: p.stat().st_mtime)
+
 
 class TrafficDetectionPipeline:
-    """Главный класс pipeline системы детекции трафика"""
-
-    def __init__(self, config_path: str = None):
-        self.config_path = config_path or 'pipeline_config.yaml'
+    def __init__(self, config_path: str = "pipeline_config.yaml"):
+        self.config_path = Path(config_path)
         self.project_root = Path(__file__).parent
+        self.config = _load_yaml(self.config_path) if self.config_path.exists() else {}
 
-        # Пути к компонентам
-        self.collector_path = self.project_root / 'Packet-Real-Time-Collector'
-        self.dpi_path = self.project_root / 'Deep-Packet-Inspection-engine'
-        self.nn_path = self.project_root / 'NN_for_PacketAnalyse'
+        self.data_dir = self.project_root / "data"
+        self.models_dir = self.project_root / "models"
+        self.results_dir = self.project_root / "results"
+        self.logs_dir = self.project_root / "logs"
 
-        # Директории для данных
-        self.data_dir = self.project_root / 'data'
-        self.models_dir = self.project_root / 'models'
-        self.results_dir = self.project_root / 'results'
+        for d in (self.data_dir, self.models_dir, self.results_dir, self.logs_dir):
+            d.mkdir(parents=True, exist_ok=True)
 
-        for dir_path in [self.data_dir, self.models_dir, self.results_dir]:
-            dir_path.mkdir(exist_ok=True)
+        sys.path.insert(0, str(COLLECTOR_SRC))
+        logger.info("Pipeline инициализирован, конфиг: %s", self.config_path)
 
-        logger.info("Pipeline инициализирован")
+    def run_collection(self, interface: Optional[str] = None, duration: Optional[int] = None) -> bool:
+        col = self.config.get("collection", {})
+        interface = interface or col.get("interface", "Ethernet")
+        duration = int(duration if duration is not None else col.get("duration", 60))
+        bpf = col.get("filters", "tcp or udp")
+        batch_size = int(col.get("batch_size", 1000))
+        flush_iv = float(col.get("flush_interval", 2.0))
 
-    def run_collection(self, interface: str = 'Ethernet', duration: int = 60):
-        """Этап 1: Сбор телеметрии"""
-        logger.info(f"Запуск сбора телеметрии на интерфейсе {interface} в течение {duration} сек")
+        logger.info("Сбор телеметрии: iface=%s, %s с, bpf=%s", interface, duration, bpf)
 
         try:
-            # Импорт компонентов коллектора
             from main import DatasetWriter, PacketCapture, list_ifaces
-            import time
-            import threading
-
-            # Проверка интерфейса
-            interfaces = list_ifaces()
-            if interface not in interfaces:
-                logger.error(f"Интерфейс {interface} не найден. Доступные: {interfaces}")
-                return False
-
-            # Создание writer
-            output_dir = str(self.data_dir / 'raw')
-            writer = DatasetWriter(
-                out_dir=output_dir,
-                fmt='parquet',
-                batch_size=1000,
-                flush_interval_sec=2.0
-            )
-
-            # Запуск writer в фоне
-            writer_thread = writer.start()
-
-            # Создание capturer
-            cap = PacketCapture(iface=interface, writer=writer, bpf_filter="tcp or udp")
-
-            # Запуск сбора в отдельном потоке с таймером
-            capture_thread = threading.Thread(target=self._run_capture_with_timeout, args=(cap, duration))
-            capture_thread.start()
-
-            # Ожидание завершения
-            capture_thread.join()
-
-            # Остановка writer
-            writer.stop()
-            time.sleep(0.5)  # Время на flush
-
-            logger.info(f"Сбор телеметрии завершен. Данные сохранены в {output_dir}")
-            return True
-
         except ImportError as e:
-            logger.error(f"Ошибка импорта коллектора: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Ошибка сбора телеметрии: {e}")
+            logger.error("Не удалось импортировать коллектор: %s", e)
             return False
 
-    def _run_capture_with_timeout(self, capturer, duration: int):
-        """Запуск захвата с таймером"""
-        import time
-        start_time = time.time()
+        ifaces = list_ifaces()
+        if interface not in ifaces:
+            logger.error("Интерфейс %s не найден. Доступные: %s", interface, ifaces)
+            return False
+
+        out_raw = self.data_dir / "raw"
+        writer = DatasetWriter(
+            out_dir=str(out_raw),
+            fmt="parquet",
+            batch_size=batch_size,
+            flush_interval_sec=flush_iv,
+        )
+        writer.start()
+        cap = PacketCapture(iface=interface, writer=writer, bpf_filter=bpf)
 
         try:
-            while time.time() - start_time < duration:
-                # Захват пакетов в цикле (имитация)
-                # В реальности PacketCapture.start() блокируется
-                time.sleep(0.1)
+            cap.start(timeout_sec=float(duration))
         except KeyboardInterrupt:
-            pass
+            logger.info("Сбор прерван пользователем")
+        finally:
+            writer.stop()
+            time.sleep(0.6)
 
-    def run_preprocessing(self, input_data: str = None):
-        """Этап 2: Предобработка и разметка"""
-        logger.info("Запуск предобработки данных")
+        logger.info("Сбор завершён, данные в %s", out_raw)
+        return True
+
+    def run_preprocessing(self, input_data: Optional[str] = None) -> bool:
+        logger.info("Предобработка")
+        pre = self.config.get("preprocessing", {})
+        window_size = int(pre.get("window_size", 100))
 
         try:
-            import pandas as pd
-            import numpy as np
-
-            # Загрузка данных
             if input_data:
-                data_path = Path(input_data)
+                path = Path(input_data)
+                if path.is_file():
+                    df = pd.read_parquet(path)
+                else:
+                    df = _load_parquet_dir(path)
             else:
-                # Ищем последние parquet файлы в raw или synthetic
-                raw_dir = self.data_dir / 'raw'
-                synthetic_dir = self.data_dir / 'synthetic'
+                raw_dir = self.data_dir / "raw"
+                syn_dir = self.data_dir / "synthetic"
+                latest = _latest_parquet_under([raw_dir, syn_dir])
+                logger.info("Источник: %s", latest)
+                df = pd.read_parquet(latest)
 
-                parquet_files = []
-                for search_dir in [raw_dir, synthetic_dir]:
-                    if search_dir.exists():
-                        parquet_files.extend(list(search_dir.rglob('*.parquet')))
+            frames = flow_rows_from_parquet(df, window_size)
+            feats_df = pd.DataFrame(frames)
+            proc_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            csv_path = self.data_dir / "processed" / "features.csv"
+            pkl_path = self.data_dir / "processed" / f"frames_{proc_ts}.pkl"
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            feats_df.to_csv(csv_path, index=False)
+            feats_df.to_pickle(pkl_path)
 
-                if not parquet_files:
-                    logger.error("Parquet файлы не найдены ни в raw/, ни в synthetic/")
-                    return False
-
-                data_path = parquet_files[0]  # Используем первый файл
-
-            logger.info(f"Обработка файла: {data_path}")
-
-            # Загрузка и предобработка
-            df = pd.read_parquet(data_path)
-            logger.info(f"Загружено {len(df)} записей")
-
-            # Группировка по flow_key для агрегации признаков
-            flow_features = defaultdict(list)
-
-            for _, row in df.iterrows():
-                flow_key = row.get('flow_key', 'unknown')
-                flow_features[flow_key].append(row)
-
-            # Извлечение агрегированных признаков для каждого flow
-            processed_data = []
-
-            for flow_key, packets in flow_features.items():
-                # if len(packets) < 2:
-                #     continue  # Пропускаем flows с одним пакетом
-
-                # Сортировка по времени
-                packets.sort(key=lambda x: x['ts_us'])
-
-                # Расчет статистик
-                timestamps = [p['ts_us'] / 1_000_000 for p in packets]
-                sizes = [p['length'] for p in packets]
-                inter_arrivals = []
-
-                for i in range(1, len(timestamps)):
-                    inter_arrivals.append(timestamps[i] - timestamps[i-1])
-
-                features = {
-                    'flow_key': flow_key,
-                    'packet_count': len(packets),
-                    'duration': timestamps[-1] - timestamps[0],
-                    'total_bytes': sum(sizes),
-                    'avg_packet_size': np.mean(sizes),
-                    'std_packet_size': np.std(sizes) if len(sizes) > 1 else 0,
-                    'min_packet_size': min(sizes),
-                    'max_packet_size': max(sizes),
-                    'pps': len(packets) / max(timestamps[-1] - timestamps[0], 0.001),
-                    'bps': sum(sizes) / max(timestamps[-1] - timestamps[0], 0.001),
-                    'avg_inter_arrival': np.mean(inter_arrivals) if inter_arrivals else 0,
-                    'std_inter_arrival': np.std(inter_arrivals) if len(inter_arrivals) > 1 else 0,
-                    'src_ip': packets[0].get('src_ip', ''),
-                    'dst_ip': packets[0].get('dst_ip', ''),
-                    'src_port': packets[0].get('src_port', 0),
-                    'dst_port': packets[0].get('dst_port', 0),
-                    'protocol': packets[0].get('protocol', ''),
-                    'is_anomaly': any(p.get('is_anomaly', False) for p in packets)
-                }
-
-                processed_data.append(features)
-
-            # Сохранение обработанных данных
-            output_path = self.data_dir / 'processed' / f'processed_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
-            output_path.parent.mkdir(exist_ok=True)
-
-            with open(output_path, 'wb') as f:
-                pickle.dump(processed_data, f)
-
-            # Также сохранить в CSV для NN_for_PacketAnalyse
-            csv_path = self.data_dir / 'processed' / 'features.csv'
-            features_df = pd.DataFrame(processed_data)
-            features_df.to_csv(csv_path, index=False)
-
-            logger.info(f"Предобработка завершена. Обработано {len(processed_data)} flows. Сохранено в {output_path} и {csv_path}")
+            logger.info("Фреймов: %s -> %s", len(frames), csv_path)
             return True
-
         except Exception as e:
-            logger.error(f"Ошибка предобработки: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Ошибка предобработки: %s", e)
             return False
 
-    def run_training(self, model_type: str = 'hybrid'):
-        """Этап 3: Обучение модели"""
-        logger.info(f"Запуск обучения модели типа: {model_type}")
-
-        try:
-            if model_type == 'autoencoder':
-                # Обучение через NN_for_PacketAnalyse
-                from train_pyod import main as train_main
-                import sys
-                from pathlib import Path
-
-                # Подготовка аргументов
-                sys.argv = ['train_pyod.py',
-                           '--csv', str(self.data_dir / 'processed' / 'features.csv'),
-                           '--out-model', str(self.models_dir / 'autoencoder_model.joblib'),
-                           '--out-scaler', str(self.models_dir / 'scaler.joblib')]
-
-                train_main()
-
-            elif model_type == 'hybrid':
-                # Обучение через Deep-Packet-Inspection-engine
-                from ml_engine import MLEngine, TrafficFeatures
-
-                # Загрузка тренировочных данных
-                processed_data_path = self.data_dir / 'processed'
-                if not processed_data_path.exists():
-                    logger.error("Обработанные данные не найдены")
-                    return False
-
-                # Загрузка pickle файлов
-                training_data = []
-                for pkl_file in processed_data_path.glob('*.pkl'):
-                    with open(pkl_file, 'rb') as f:
-                        data = pickle.load(f)
-                        training_data.extend(data)
-
-                # Обучение
-                ml_engine = MLEngine()
-                # Здесь нужно добавить метод для обучения на данных
-                # Пока placeholder
-                ml_engine.save_models()
-
-            logger.info("Обучение модели завершено")
-            return True
-
-        except Exception as e:
-            logger.error(f"Ошибка обучения: {e}")
+    def run_training(self, model_type: Optional[str] = None) -> bool:
+        logger.info("Обучение модели")
+        csv_path = self.data_dir / "processed" / "features.csv"
+        if not csv_path.exists():
+            logger.error("Нет %s — сначала preprocess", csv_path)
             return False
 
-    def run_validation(self, test_data: str = None):
-        """Этап 4: Валидация и тест"""
-        logger.info("Запуск валидации модели")
+        cfg = dict(self.config)
+        if model_type:
+            cfg.setdefault("training", {})
+            cfg["training"]["model_type"] = model_type
 
         try:
-            from ml_engine import MLEngine
-            import pandas as pd
-            from sklearn.metrics import classification_report
-
-            # Загрузка модели
-            ml_engine = MLEngine()
-
-            # Загрузка тестовых данных
-            if test_data:
-                test_path = Path(test_data)
-            else:
-                test_path = self.data_dir / 'test' / 'test_data.csv'
-
-            if not test_path.exists():
-                logger.error(f"Тестовые данные не найдены: {test_path}")
-                return False
-
-            # Валидация
-            # Placeholder для метрик
-            logger.info("Валидация завершена")
+            df = pd.read_csv(csv_path)
+            frames: List[Dict[str, Any]] = df.to_dict(orient="records")
+            ensemble, _, _ = train_ensemble(frames, cfg)
+            model_path = self.models_dir / "ensemble.joblib"
+            save_ensemble(model_path, ensemble)
+            logger.info(
+                "Сохранено %s; T_low=%.4f T_high=%.4f",
+                model_path,
+                ensemble.t_low,
+                ensemble.t_high,
+            )
             return True
-
         except Exception as e:
-            logger.error(f"Ошибка валидации: {e}")
+            logger.exception("Ошибка обучения: %s", e)
             return False
 
-    def run_monitoring(self):
-        """Этап 6: Мониторинг качества"""
-        logger.info("Запуск мониторинга")
+    def run_inference(
+        self,
+        model_path: Optional[Path] = None,
+        features_csv: Optional[Path] = None,
+        record_metrics: bool = True,
+    ) -> bool:
+        """Инференс, углубленная проверка, запись SIEM-подобных событий."""
+        t0 = time.perf_counter()
+        mpath = model_path or (self.models_dir / "ensemble.joblib")
+        fpath = features_csv or (self.data_dir / "processed" / "features.csv")
+        if not mpath.exists():
+            logger.error("Нет модели %s", mpath)
+            return False
+        if not fpath.exists():
+            logger.error("Нет признаков %s", fpath)
+            return False
 
+        ensemble = load_ensemble(mpath)
+        df = pd.read_csv(fpath)
+        frames = df.to_dict(orient="records")
+        events = predict_frames(ensemble, frames, self.config)
+
+        out_jsonl = self.results_dir / f"events_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        write_events_jsonl(events, out_jsonl)
+        events.to_csv(self.results_dir / "last_decisions.csv", index=False)
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        mon = self.config.get("monitoring", {})
+        max_lat = float(mon.get("alert_thresholds", {}).get("latency", 1000))
+        if elapsed_ms > max_lat:
+            logger.warning("Превышение целевой latency: %.1f мс (порог %s)", elapsed_ms, max_lat)
+
+        if record_metrics:
+            try:
+                from monitoring_system import MonitoringSystem
+
+                ms = MonitoringSystem()
+                statuses = events["status"].tolist()
+                scores = events["anomaly_score"].astype(float).tolist()
+                ms.observe_batch(elapsed_ms, scores, statuses)
+                rate = float(events.attrs.get("suspicious_rate", 0))
+                if events.attrs.get("anomaly_rate_alert"):
+                    logger.warning(
+                        "Доля подозрительных фреймов %.3f выше порога anomaly_rate", rate
+                    )
+            except ImportError:
+                pass
+
+        logger.info("Решения: %s (за %.1f мс) -> %s", len(events), elapsed_ms, out_jsonl)
+        return True
+
+    def run_validation(self, test_data: Optional[str] = None) -> bool:
+        """Валидация: инференс + метрики, если в данных есть is_anomaly."""
+        logger.info("Валидация")
         try:
-            # Импорт мониторинга
+            from sklearn.metrics import classification_report, roc_auc_score
+        except ImportError:
+            classification_report = None
+            roc_auc_score = None
+
+        test_path = Path(test_data) if test_data else (self.data_dir / "processed" / "features.csv")
+        if not test_path.exists():
+            logger.error("Нет данных: %s", test_path)
+            return False
+
+        mpath = self.models_dir / "ensemble.joblib"
+        if not mpath.exists():
+            logger.error("Нет обученной модели %s", mpath)
+            return False
+
+        ensemble = load_ensemble(mpath)
+        df = pd.read_csv(test_path)
+        if "is_anomaly" not in df.columns:
+            logger.warning("Колонка is_anomaly отсутствует — только прогон инференса")
+            return self.run_inference(model_path=mpath, features_csv=test_path, record_metrics=False)
+
+        frames = df.to_dict(orient="records")
+        events = predict_frames(ensemble, frames, self.config)
+
+        y_true = df["is_anomaly"].astype(bool).values
+        y_pred = events["status"].ne("regular").values
+
+        report_path = self.results_dir / "validation_report.txt"
+        lines = [
+            f"Время: {datetime.now().isoformat()}",
+            f"Записей: {len(df)}",
+        ]
+        if classification_report:
+            lines.append(classification_report(y_true, y_pred, zero_division=0))
+        if roc_auc_score and len(set(y_true)) > 1:
+            try:
+                auc = roc_auc_score(y_true, events["anomaly_score"].values)
+                lines.append(f"ROC-AUC (score vs is_anomaly): {auc:.4f}")
+            except ValueError:
+                pass
+
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("Отчёт: %s", report_path)
+        return True
+
+    def run_monitoring(self) -> bool:
+        logger.info("Экспорт метрик Prometheus (Ctrl+C для остановки)")
+        try:
             from monitoring_system import MonitoringSystem
 
-            monitor = MonitoringSystem()
-            # Запуск мониторинга в фоне
-            monitor.start()
-
-            logger.info("Мониторинг запущен")
+            port = int(self.config.get("monitoring", {}).get("prometheus_port", 9108))
+            m = MonitoringSystem(port=port)
+            m.start()
+            if not getattr(m, "_enabled", False):
+                logger.warning("prometheus_client не установлен")
+                return False
+            logger.info("Метрики: http://127.0.0.1:%s/metrics", port)
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
             return True
-
-        except ImportError:
-            logger.warning("Мониторинг не реализован")
+        except Exception as e:
+            logger.exception("Мониторинг: %s", e)
             return False
 
-    def _calculate_entropy(self, payload: str) -> float:
-        """Расчет энтропии payload"""
-        if not payload:
-            return 0.0
 
-        import math
-        entropy = 0.0
-        payload_bytes = payload.encode('utf-8', errors='ignore')
-
-        if len(payload_bytes) == 0:
-            return 0.0
-
-        for byte in range(256):
-            p = payload_bytes.count(byte) / len(payload_bytes)
-            if p > 0:
-                entropy -= p * math.log2(p)
-
-        return entropy
-
-def main():
-    parser = argparse.ArgumentParser(description='Traffic Detection Pipeline')
-    parser.add_argument('--config', default='pipeline_config.yaml', help='Config file')
-    parser.add_argument('--stage', choices=['all', 'collect', 'preprocess', 'train', 'validate', 'monitor'],
-                       default='all', help='Pipeline stage to run')
-    parser.add_argument('--interface', default='Ethernet', help='Network interface for collection')
-    parser.add_argument('--duration', type=int, default=60, help='Collection duration in seconds')
-    parser.add_argument('--model-type', choices=['autoencoder', 'hybrid'], default='hybrid',
-                       help='Model type for training')
-
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Traffic Detection Pipeline")
+    parser.add_argument("--config", default="pipeline_config.yaml")
+    parser.add_argument(
+        "--stage",
+        choices=[
+            "all",
+            "collect",
+            "preprocess",
+            "train",
+            "infer",
+            "validate",
+            "monitor",
+        ],
+        default="all",
+    )
+    parser.add_argument("--interface", default=None)
+    parser.add_argument("--duration", type=int, default=None)
+    parser.add_argument("--model-type", choices=["autoencoder", "hybrid"], default=None)
     args = parser.parse_args()
 
     pipeline = TrafficDetectionPipeline(args.config)
 
-    if args.stage == 'all':
-        # Полный pipeline
-        success = True
-        success &= pipeline.run_collection(args.interface, args.duration)
-        success &= pipeline.run_preprocessing()
-        success &= pipeline.run_training(args.model_type)
-        success &= pipeline.run_validation()
-        success &= pipeline.run_monitoring()
-
-        if success:
-            logger.info("Pipeline выполнен успешно")
-        else:
-            logger.error("Pipeline завершен с ошибками")
+    if args.stage == "all":
+        ok = True
+        ok &= pipeline.run_collection(args.interface, args.duration)
+        ok &= pipeline.run_preprocessing()
+        ok &= pipeline.run_training(args.model_type)
+        ok &= pipeline.run_validation()
+        _ = pipeline.run_inference(record_metrics=False)
+        if not ok:
             sys.exit(1)
+        logger.info("Полный pipeline выполнен")
+        return
 
-    elif args.stage == 'collect':
-        pipeline.run_collection(args.interface, args.duration)
-    elif args.stage == 'preprocess':
-        pipeline.run_preprocessing()
-    elif args.stage == 'train':
-        pipeline.run_training(args.model_type)
-    elif args.stage == 'validate':
-        pipeline.run_validation()
-    elif args.stage == 'monitor':
-        pipeline.run_monitoring()
+    if args.stage == "collect":
+        sys.exit(0 if pipeline.run_collection(args.interface, args.duration) else 1)
+    if args.stage == "preprocess":
+        sys.exit(0 if pipeline.run_preprocessing() else 1)
+    if args.stage == "train":
+        sys.exit(0 if pipeline.run_training(args.model_type) else 1)
+    if args.stage == "infer":
+        sys.exit(0 if pipeline.run_inference() else 1)
+    if args.stage == "validate":
+        sys.exit(0 if pipeline.run_validation() else 1)
+    if args.stage == "monitor":
+        sys.exit(0 if pipeline.run_monitoring() else 1)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

@@ -4,12 +4,13 @@
 
 ## Архитектура
 
-Проект состоит из четырех основных компонентов:
+Проект состоит из основных компонентов:
 
 1. **Packet-Real-Time-Collector** - Сбор и хранение сетевых пакетов в реальном времени
-2. **NN_for_PacketAnalyse** - Нейросетевые модели для анализа трафика (PyOD AutoEncoder)
-3. **Deep-Packet-Inspection-engine** - Глубокий анализ пакетов с ML (RandomForest, Isolation Forest)
-4. **Main Pipeline** - Оркестрация всего MLOps-цикла
+2. **detection_core.py** - Предобработка/признаки, ансамбль pyOD, углубленная проверка, финальные статусы
+3. **main_pipeline.py** - Оркестрация MLOps-цикла (сбор -> признаки -> обучение -> валидация -> инференс)
+4. **monitoring_system.py** - Экспорт метрик Prometheus
+5. **synthetic_generator.py** - Генерация синтетических сценариев (burst, scan)
 
 ## Установка
 
@@ -21,7 +22,7 @@ cd DiplomFOR
 # Установка основных зависимостей
 pip install -r requirements.txt
 
-# Установка зависимостей компонентов
+# Установка зависимостей коллектора
 pip install -r Packet-Real-Time-Collector/requirements.txt
 ```
 
@@ -101,9 +102,7 @@ data/
 └── test/                   # Тестовые датасеты
 
 models/                     # Сохраненные модели
-├── autoencoder_model.joblib
-├── scaler.joblib
-└── traffic_classifier.joblib
+└── ensemble.joblib
 
 results/                    # Результаты валидации
 logs/                       # Логи работы
@@ -111,7 +110,7 @@ logs/                       # Логи работы
 
 ## Модели
 
-### AutoEncoder (PyOD)
+### Ансамбль (PyOD)
 - Обучение на нормальном трафике
 - Детекция аномалий по reconstruction error
 - Признаки: pps, bps, packet_size stats, inter-arrival times
@@ -132,8 +131,8 @@ logs/                       # Логи работы
 ## Разработка и тестирование
 
 ### Добавление новых признаков
-1. Обновить `TrafficFeatures` в `ml_engine.py`
-2. Добавить извлечение в `extract_anomaly_features()`
+1. Обновить `extract_frame_features()` в `detection_core.py`
+2. Добавить колонку в `NUMERIC_FEATURE_COLS`
 3. Переобучить модель
 
 ### Тестирование на реальных данных
@@ -157,5 +156,3 @@ logs/                       # Логи работы
 ## Документация
 
 - [Статья](Статья.md) - Теоретические основы
-- [API Reference](docs/api.md) - Документация по классам
-- [Experiments](docs/experiments.md) - Результаты тестирования

@@ -1,0 +1,12 @@
+Время: 2026-05-17T10:10:40.197170
+Записей: 300
+              precision    recall  f1-score   support
+
+       False       0.92      0.41      0.57       201
+        True       0.44      0.93      0.60        99
+
+    accuracy                           0.58       300
+   macro avg       0.68      0.67      0.58       300
+weighted avg       0.76      0.58      0.58       300
+
+ROC-AUC (score vs is_anomaly): 0.9470

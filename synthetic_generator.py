@@ -70,22 +70,31 @@ class SyntheticTrafficGenerator:
 
         return records
 
-    def generate_anomaly_burst(self, base_records: List[Dict[str, Any]], burst_start: int, burst_duration: int = 10, multiplier: int = 5) -> List[Dict[str, Any]]:
-        """Генерация burst аномалии"""
-        anomalous_records = []
+    def generate_anomaly_burst(
+        self,
+        base_records: List[Dict[str, Any]],
+        burst_start_offset_sec: float,
+        burst_duration: int = 10,
+        multiplier: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Вставка burst: burst_start_offset_sec — смещение от первой метки времени в base_records."""
+        if not base_records:
+            return []
+        t0 = min(r["ts_us"] for r in base_records) / 1_000_000
+        t1 = t0 + burst_start_offset_sec
+        t2 = t1 + burst_duration
 
+        anomalous_records = []
         for record in base_records:
             anomalous_records.append(record)
-
-            # Добавление burst в указанное время
-            if burst_start <= record['ts_us'] / 1_000_000 <= burst_start + burst_duration:
-                # Создание дополнительных пакетов
+            ts_sec = record["ts_us"] / 1_000_000
+            if t1 <= ts_sec <= t2:
                 for _ in range(multiplier - 1):
                     burst_record = record.copy()
-                    burst_record['ts_us'] += random.randint(1, 1000)  # Небольшое смещение времени
-                    burst_record['length'] = random.randint(1000, 1500)  # Большие пакеты
-                    burst_record['payload_len'] = burst_record['length'] - 40
-                    burst_record['is_anomaly'] = True
+                    burst_record["ts_us"] += random.randint(1, 1000)
+                    burst_record["length"] = random.randint(1000, 1500)
+                    burst_record["payload_len"] = max(0, burst_record["length"] - 40)
+                    burst_record["is_anomaly"] = True
                     anomalous_records.append(burst_record)
 
         return anomalous_records
@@ -101,6 +110,7 @@ class SyntheticTrafficGenerator:
 
             src_ip = random.choice(self.external_ips)
             dst_port = random.randint(1, 1024)  # Сканирование низких портов
+            src_port = random.randint(1024, 65535)
 
             record = {
                 "ts_us": int(ts * 1_000_000),
@@ -117,10 +127,10 @@ class SyntheticTrafficGenerator:
                 "protocol": "TCP",
                 "src_ip": src_ip,
                 "dst_ip": target_ip,
-                "src_port": random.randint(1024, 65535),
+                "src_port": src_port,
                 "dst_port": dst_port,
                 "tcp_flags": "S",
-                "flow_key": f"{src_ip}:{random.randint(1024, 65535)}-{target_ip}:{dst_port}-TCP",
+                "flow_key": f"{src_ip}:{src_port}-{target_ip}:{dst_port}-TCP",
                 "payload_sample": "",
                 "is_anomaly": True
             }
@@ -172,7 +182,7 @@ def main():
     parser.add_argument('--output-dir', default='data/synthetic', help='Output directory')
     parser.add_argument('--normal-duration', type=int, default=60, help='Normal traffic duration (seconds)')
     parser.add_argument('--anomaly-type', choices=['none', 'burst', 'scan'], default='burst', help='Anomaly type')
-    parser.add_argument('--anomaly-start', type=int, default=30, help='Anomaly start time (seconds)')
+    parser.add_argument('--anomaly-start', type=int, default=30, help='Смещение burst от начала трассировки (секунды)')
 
     args = parser.parse_args()
 
