@@ -172,14 +172,12 @@ class PacketCapture:
         except Exception:
             self.iface_mac = None
 
-    def start(self, timeout_sec: Optional[float] = None):
-        """Запуск захвата. При указании timeout_sec sniff завершится по таймеру (см. Scapy)."""
+    def start(self):
         sniff(
             iface=self.iface,
             filter=self.bpf_filter if self.bpf_filter else None,
             prn=self._on_packet,
             store=False,
-            timeout=timeout_sec,
         )
 
     def _on_packet(self, pkt):

@@ -4,12 +4,7 @@
 Скрипт для тестирования pipeline системы детекции трафика
 """
 
-import sys
-import os
 from pathlib import Path
-
-# Добавление корневой директории в путь
-sys.path.insert(0, str(Path(__file__).parent))
 
 from main_pipeline import TrafficDetectionPipeline
 
@@ -38,7 +33,7 @@ def test_pipeline():
     print("1. Генерация синтетических данных...")
     from synthetic_generator import SyntheticTrafficGenerator
     generator = SyntheticTrafficGenerator()
-    records = generator.generate_dataset(normal_duration=30, anomaly_type='burst', anomaly_start=15)
+    generator.generate_dataset(normal_duration=30, anomaly_type='burst', anomaly_start=15)
 
     # Предобработка
     print("2. Предобработка данных...")
@@ -49,7 +44,7 @@ def test_pipeline():
 
     # Обучение
     print("3. Обучение модели...")
-    success = pipeline.run_training('autoencoder')
+    success = pipeline.run_training('hybrid')
     if not success:
         print("Ошибка обучения")
         return False

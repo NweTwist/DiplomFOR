@@ -4,13 +4,12 @@
 
 ## Архитектура
 
-Проект состоит из основных компонентов:
+Проект состоит из четырех основных компонентов:
 
 1. **Packet-Real-Time-Collector** - Сбор и хранение сетевых пакетов в реальном времени
 2. **detection_core.py** - Предобработка/признаки, ансамбль pyOD, углубленная проверка, финальные статусы
-3. **main_pipeline.py** - Оркестрация MLOps-цикла (сбор -> признаки -> обучение -> валидация -> инференс)
-4. **monitoring_system.py** - Экспорт метрик Prometheus
-5. **synthetic_generator.py** - Генерация синтетических сценариев (burst, scan)
+3. **monitoring_system.py** - Экспорт метрик Prometheus для наблюдаемости
+4. **Main Pipeline** - Оркестрация всего MLOps-цикла
 
 ## Установка
 
@@ -22,7 +21,7 @@ cd DiplomFOR
 # Установка основных зависимостей
 pip install -r requirements.txt
 
-# Установка зависимостей коллектора
+# Установка зависимостей компонентов
 pip install -r Packet-Real-Time-Collector/requirements.txt
 ```
 
@@ -53,7 +52,7 @@ python main_pipeline.py --stage collect --interface Ethernet --duration 60
 python main_pipeline.py --stage preprocess
 
 # 3. Обучение модели
-python main_pipeline.py --stage train --model-type autoencoder
+python main_pipeline.py --stage train --model-type hybrid
 
 # 4. Валидация
 python main_pipeline.py --stage validate
@@ -99,7 +98,7 @@ data/
 ├── raw/                    # Raw пакеты (Parquet)
 ├── processed/              # Обработанные признаки
 ├── synthetic/              # Синтетические данные для тестов
-└── test/                   # Тестовые датасеты
+└── test/                   # Тестовые датасеты (опционально)
 
 models/                     # Сохраненные модели
 └── ensemble.joblib
@@ -110,15 +109,15 @@ logs/                       # Логи работы
 
 ## Модели
 
-### Ансамбль (PyOD)
+### AutoEncoder (PyOD)
 - Обучение на нормальном трафике
 - Детекция аномалий по reconstruction error
 - Признаки: pps, bps, packet_size stats, inter-arrival times
 
-### Hybrid Model (Deep Packet Inspection)
-- RandomForest для классификации протоколов
-- Isolation Forest для anomaly detection
-- Статистические правила + ML
+### Hybrid Model (pyOD ensemble)
+- Isolation Forest как быстрый бейзлайн
+- AutoEncoder как нелинейный слой (если доступен)
+- Статистические правила + ML для финального статуса
 
 ## Мониторинг
 
@@ -131,9 +130,9 @@ logs/                       # Логи работы
 ## Разработка и тестирование
 
 ### Добавление новых признаков
-1. Обновить `extract_frame_features()` в `detection_core.py`
-2. Добавить колонку в `NUMERIC_FEATURE_COLS`
-3. Переобучить модель
+1. Обновить список `NUMERIC_FEATURE_COLS` и логику в detection_core.py
+2. Перегенерировать фреймы (stage preprocess)
+3. Переобучить модель (stage train)
 
 ### Тестирование на реальных данных
 1. Запустить сбор на реальном интерфейсе
@@ -156,3 +155,5 @@ logs/                       # Логи работы
 ## Документация
 
 - [Статья](Статья.md) - Теоретические основы
+- [API Reference](docs/api.md) - Документация по классам
+- [Experiments](docs/experiments.md) - Результаты тестирования

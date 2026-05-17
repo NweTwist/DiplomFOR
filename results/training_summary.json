@@ -1,0 +1,9 @@
+{
+  "trained_at": "2026-05-17T09:26:36.248268Z",
+  "model_type": "hybrid",
+  "frames_total": 300,
+  "t_low": 0.611664480049291,
+  "t_high": 0.8581973147555105,
+  "contamination": 0.1,
+  "threshold_quantile": 0.99
+}

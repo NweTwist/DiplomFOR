@@ -37,11 +37,10 @@ validation:
 # Настройки мониторинга
 monitoring:
   enabled: true
-  metrics_interval: 60
-  prometheus_port: 9108
+  metrics_interval: 60  # Интервал сбора метрик в секундах
   alert_thresholds:
-    anomaly_rate: 0.1
-    latency: 1000
+    anomaly_rate: 0.1   # Порог для алертов по аномалиям
+    latency: 1000       # Максимальная latency в мс
 
 # Пути к данным
 paths:
