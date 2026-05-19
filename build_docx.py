@@ -16,7 +16,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 SRC    = Path("VKR_complete.md")
-OUTPUT = Path("VKR_Magisterskaya_Dissertatsiya.docx")
+OUTPUT = Path("VKR_Dissertatsiya_final.docx")
 
 FONT  = "Times New Roman"
 SZ14  = Pt(14)
@@ -108,12 +108,15 @@ def _set_outline_level(para, level: int):
     pPr.append(ol)
 
 
-def h1(doc, text):          # ВВЕДЕНИЕ / ГЛАВА N — по центру, caps, 16pt
+def h1(doc, text):
+    """Заголовок главы: 18pt, жирный, по ширине, отступ 1.25 см, 0 до / 12 после."""
     p = doc.add_paragraph()
-    _pfmt(p, align=WD_ALIGN_PARAGRAPH.CENTER, first=None,
-          sb=Pt(18), sa=Pt(12))
-    r = p.add_run(text.upper())
-    _rpr(r, sz=SZ16, bold=True)
+    _pfmt(p, align=WD_ALIGN_PARAGRAPH.JUSTIFY, first=INDENT,
+          sb=Pt(0), sa=Pt(12))
+    # Первая буква заглавная, остальные как есть (не all-caps)
+    display = text[0].upper() + text[1:] if text else text
+    r = p.add_run(display)
+    _rpr(r, sz=Pt(18), bold=True)
     _set_outline_level(p, 0)
 
 
@@ -178,6 +181,12 @@ def parse_table(lines):
 def add_table(doc, header, data, caption):
     if not header:
         return
+    # Название таблицы — ПЕРЕД таблицей
+    if caption:
+        cp = doc.add_paragraph()
+        _pfmt(cp, align=WD_ALIGN_PARAGRAPH.LEFT, first=None,
+              sb=Pt(6), sa=Pt(2))
+        _rpr(cp.add_run(caption), sz=SZ12)
     t = doc.add_table(rows=1 + len(data), cols=len(header))
     t.alignment = WD_TABLE_ALIGNMENT.CENTER
     t.style = "Table Grid"
@@ -202,10 +211,7 @@ def add_table(doc, header, data, caption):
             _pfmt(pp, align=WD_ALIGN_PARAGRAPH.LEFT, first=None,
                   sb=Pt(1), sa=Pt(1))
             _rpr(pp.add_run(val), sz=SZ12)
-    cp = doc.add_paragraph()
-    _pfmt(cp, align=WD_ALIGN_PARAGRAPH.CENTER, first=None,
-          sb=Pt(4), sa=Pt(10))
-    _rpr(cp.add_run(caption), sz=SZ12, italic=True)
+    doc.add_paragraph()  # отступ после таблицы
 
 
 def add_inline(doc, text, *, ind=True, align=WD_ALIGN_PARAGRAPH.JUSTIFY):
@@ -279,35 +285,13 @@ def render(doc, md_text: str):
     i       = 0
     in_code = False
     code_buf: list[str] = []
-    tbl_buf:  list[str] = []
-    in_tbl  = False
-
-    def flush_table():
-        nonlocal tbl_buf, in_tbl
-        if tbl_buf:
-            hdr, data = parse_table(tbl_buf)
-            pending_caption[0] = ("TABLE", hdr, data)
-        tbl_buf  = []
-        in_tbl   = False
-
-    pending_caption: list = [None]   # (kind, ...)
-
-    def try_emit_pending(cap_line: str):
-        if pending_caption[0] is None:
-            return False
-        kind = pending_caption[0][0]
-        if kind == "TABLE":
-            _, hdr, data = pending_caption[0]
-            add_table(doc, hdr, data, cap_line.strip())
-            pending_caption[0] = None
-            return True
-        return False
 
     while i < n:
         line = lines[i]
+        stripped = line.strip()
 
         # ── код ──────────────────────────────────────────────────────────
-        if line.strip().startswith("```"):
+        if stripped.startswith("```"):
             if not in_code:
                 in_code  = True
                 code_buf = []
@@ -322,45 +306,43 @@ def render(doc, md_text: str):
             i += 1
             continue
 
-        # ── подпись таблицы ПОСЛЕ таблицы ────────────────────────────────
-        if pending_caption[0] is not None:
-            stripped = line.strip()
-            if re.match(r"^Таблица\s+", stripped):
-                try_emit_pending(stripped)
-                i += 1
-                continue
-            elif stripped == "":
-                i += 1
+        # ── подпись таблицы ПЕРЕД таблицей ────────────────────────────────
+        if re.match(r"^Таблица\s+", stripped) and "|" not in stripped:
+            caption = stripped
+            j = i + 1
+            while j < n and lines[j].strip() == "":
+                j += 1
+            if j < n and lines[j].lstrip().startswith("|"):
+                tbl_lines = []
+                while j < n and lines[j].lstrip().startswith("|"):
+                    tbl_lines.append(lines[j])
+                    j += 1
+                hdr, data = parse_table(tbl_lines)
+                if hdr:
+                    add_table(doc, hdr, data, caption)
+                i = j
                 continue
             else:
-                # нет подписи — выводим без неё
-                _, hdr, data = pending_caption[0]
-                add_table(doc, hdr, data, "")
-                pending_caption[0] = None
-                # не инкрементируем — обработаем строку снова
-
-        # ── таблица ───────────────────────────────────────────────────────
-        if "|" in line:
-            if not in_tbl:
-                in_tbl  = True
-                tbl_buf = []
-            tbl_buf.append(line)
-            i += 1
-            continue
-        else:
-            if in_tbl:
-                flush_table()
-                # не инкрементируем — обработаем строку снова
+                add_inline(doc, stripped)
+                i += 1
                 continue
 
-        stripped = line.strip()
+        # ── строка таблицы без подписи (на случай осиротевших) ───────────
+        if stripped.startswith("|"):
+            tbl_lines = []
+            while i < n and lines[i].lstrip().startswith("|"):
+                tbl_lines.append(lines[i])
+                i += 1
+            hdr, data = parse_table(tbl_lines)
+            if hdr:
+                add_table(doc, hdr, data, "")
+            continue
 
         # ── рисунок ───────────────────────────────────────────────────────
         img = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', stripped)
         if img:
             caption = img.group(1)
             path    = img.group(2)
-            # следующая непустая строка — подпись «Рисунок …»
             j = i + 1
             while j < n and lines[j].strip() == "":
                 j += 1
@@ -386,35 +368,21 @@ def render(doc, md_text: str):
             h3(doc, line[4:].strip())
         elif line.startswith("## "):
             txt = line[3:].strip()
-            # «Введение» и «Глава N» — как h1 (без номера, по центру)
-            if txt == "Введение" or re.match(r"^Глава\s+\d", txt) \
-               or txt == "Список использованных источников":
+            if txt in ("Введение", "Заключение", "Список использованных источников") \
+               or re.match(r"^Глава\s+\d", txt):
                 h1(doc, txt)
             else:
                 h2(doc, txt)
         elif line.startswith("# "):
             h1(doc, line[2:].strip())
-
-        # ── список ────────────────────────────────────────────────────────
         elif stripped.startswith("- ") or stripped.startswith("* "):
             add_bullet(doc, stripped[2:].strip())
-
-        # ── пустая строка ────────────────────────────────────────────────
         elif stripped == "":
             pass
-
-        # ── текст ────────────────────────────────────────────────────────
         else:
             add_inline(doc, stripped)
 
         i += 1
-
-    # дочистка
-    if in_tbl:
-        flush_table()
-    if pending_caption[0] is not None:
-        _, hdr, data = pending_caption[0]
-        add_table(doc, hdr, data, "")
 
 
 # ──────────────────── титул ──────────────────────────────────────────────────
